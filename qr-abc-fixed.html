@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>QR Cards Estables</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
+
+<style>
+/* ========================
+   RESET Y BASE
+======================== */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background: #f9fafb;
+}
+
+/* ========================
+   TARJETA (BASE)
+======================== */
+.qr-card {
+  width: 378px;   /* 10cm ≈ 378px @ 96dpi */
+  height: 189px;  /* 5cm ≈ 189px */
+  border: 2px solid #005e94;
+  border-radius: 6px;
+  background: white;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  overflow: hidden;
+}
+
+/* ========================
+   SECCIÓN QR (IZQUIERDA)
+======================== */
+.qr-section {
+  display: grid;
+  grid-template-rows: auto auto;
+  justify-items: center;
+  align-items: center;
+  padding: 10px;
+}
+
+/* QR imagen */
+.qr-section img {
+  width: 132px;
+  height: 132px;
+  display: block;
+}
+
+/* Patente */
+.qr-section h3 {
+  margin: 6px 0 0;
+  font-size: 20px;
+  font-weight: 700;
+  color: #005e94;
+  letter-spacing: 1px;
+}
+
+/* ========================
+   SECCIÓN ABC (DERECHA)
+======================== */
+.abc-section {
+  border-left: 2px solid #005e94;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  overflow: hidden;
+}
+
+.abc-inner {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+}
+
+.abc-img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+/* ========================
+   LAYOUT DE IMPRESIÓN
+======================== */
+@media print {
+  body {
+    margin: 5mm;
+    background: white;
+  }
+
+  @page {
+    size: letter landscape;
+    margin: 5mm;
+  }
+
+  .qr-card {
+    width: 10cm !important;
+    height: 5cm !important;
+    border: 2px solid #005e94 !important;
+    page-break-inside: avoid;
+  }
+
+  .qr-section img {
+    width: 3.5cm !important;
+    height: 3.5cm !important;
+  }
+
+  .qr-section h3 {
+    font-size: 20px !important;
+  }
+
+  .abc-section {
+    border-left: 2px solid #005e94 !important;
+  }
+
+  /* Cada tipo (excepto el primero) comienza en nueva hoja */
+  .vehicle-type-section {
+    page-break-before: always;
+  }
+}
+
+/* ========================
+   UI (no impresión)
+======================== */
+.no-print {
+  display: block;
+}
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
+}
+</style>
+</head>
+
+<body>
+<div id="app"></div>
+
+<script>
+const app = document.getElementById('app');
+
+let state = {
+  vehicles: [],
+  qrColor: '#005e94',
+  logoUrl: null,
+  logoSize: 25,
+  abcImageUrl: null,
+  qrDataUrls: {},
+  showConfig: false
+};
+
+function setState(newState) {
+  state = { ...state, ...newState };
+  if (newState.qrColor !== undefined || newState.logoUrl !== undefined || newState.logoSize !== undefined || newState.vehicles !== undefined) {
+    setTimeout(regenerateQRCodes, 50);
+  } else {
+    render();
+  }
+}
+
+function handleLogoUpload(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = ev => setState({ logoUrl: ev.target.result });
+  reader.readAsDataURL(file);
+}
+
+function handleABCUpload(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = ev => setState({ abcImageUrl: ev.target.result });
+  reader.readAsDataURL(file);
+}
+
+function handleFileUpload(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const ext = file.name.split('.').pop().toLowerCase();
+  if (ext === 'xlsx' || ext === 'xls') {
+    const reader = new FileReader();
+    reader.onload = ev => {
+      const data = new Uint8Array(ev.target.result);
+      const workbook = XLSX.read(data, { type: 'array' });
+      const sheet = workbook.Sheets[workbook.SheetNames[0]];
+      const json = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+      const vehicles = json.map(r => ({
+        cliente: r.Cliente || r.cliente || '',
+        patente: r.Patente || r.patente || '',
+        tipo: r.Tipo || r.tipo || '',
+        driveUrl: r.URL || r.url || ''
+      })).filter(v => v.patente);
+      setState({ vehicles, qrDataUrls: {} });
+    };
+    reader.readAsArrayBuffer(file);
+  } else {
+    const reader = new FileReader();
+    reader.onload = ev => parseCSV(ev.target.result);
+    reader.readAsText(file);
+  }
+}
+
+function parseCSV(text) {
+  const lines = text.split('\n').filter(l => l.trim());
+  const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
+  const vehicles = lines.slice(1).map(line => {
+    const values = line.split(',').map(v => v.trim());
+    const row = {};
+    headers.forEach((h, i) => row[h] = values[i] || '');
+    return {
+      cliente: row.cliente || row.client || '',
+      patente: row.patente || row.plate || '',
+      tipo: row.tipo || row.type || '',
+      driveUrl: row.url || row.drive || ''
+    };
+  }).filter(v => v.patente);
+  setState({ vehicles, qrDataUrls: {} });
+}
+
+function regenerateQRCodes() {
+  const qrDataUrls = {};
+  const promises = state.vehicles.map(vehicle => {
+    if (!vehicle.driveUrl) return Promise.resolve();
+    return new Promise(resolve => {
+      const size = 600;
+      const qr = qrcode(10, 'H');
+      qr.addData(vehicle.driveUrl);
+      qr.make();
+      const canvas = document.createElement('canvas');
+      canvas.width = size;
+      canvas.height = size;
+      const ctx = canvas.getContext('2d');
+      const count = qr.getModuleCount();
+      const tile = size / count;
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, size, size);
+      for (let r = 0; r < count; r++) {
+        for (let c = 0; c < count; c++) {
+          ctx.fillStyle = qr.isDark(r, c) ? state.qrColor : '#fff';
+          ctx.fillRect(c * tile, r * tile, tile, tile);
+        }
+      }
+      if (state.logoUrl) {
+        const img = new Image();
+        img.src = state.logoUrl;
+        img.onload = () => {
+          const logoSize = size * (state.logoSize / 100);
+          const x = (size - logoSize) / 2;
+          const y = (size - logoSize) / 2;
+          ctx.fillStyle = '#fff';
+          ctx.fillRect(x - 12, y - 12, logoSize + 24, logoSize + 24);
+          ctx.drawImage(img, x, y, logoSize, logoSize);
+          qrDataUrls[vehicle.patente] = canvas.toDataURL();
+          resolve();
+        };
+      } else {
+        qrDataUrls[vehicle.patente] = canvas.toDataURL();
+        resolve();
+      }
+    });
+  });
+  Promise.all(promises).then(() => {
+    state.qrDataUrls = qrDataUrls;
+    render();
+  });
+}
+
+function groupByClient() {
+  const grouped = {};
+  state.vehicles.forEach(v => {
+    const client = v.cliente || 'Sin Cliente';
+    if (!grouped[client]) grouped[client] = {};
+    if (!grouped[client][v.tipo]) grouped[client][v.tipo] = [];
+    grouped[client][v.tipo].push(v);
+  });
+  return grouped;
+}
+
+function render() {
+  const grouped = groupByClient();
+  app.innerHTML = `
+  <div class="no-print bg-white shadow-sm border-b sticky top-0 z-10 p-4">
+    <div class="flex flex-wrap gap-3 items-center justify-between max-w-7xl mx-auto">
+      <h1 class="text-xl font-bold">Generador QR</h1>
+      <div class="flex gap-3 flex-wrap">
+        <button onclick="document.getElementById('fileInput').click()" class="px-4 py-2 bg-blue-600 text-white rounded">Importar CSV/Excel</button>
+        <input id="fileInput" type="file" accept=".csv,.txt,.xlsx,.xls" onchange="handleFileUpload(event)" class="hidden">
+        <button onclick="document.getElementById('logoInput').click()" class="px-4 py-2 bg-gray-200 rounded">Logo QR</button>
+        <input id="logoInput" type="file" accept="image/*" onchange="handleLogoUpload(event)" class="hidden">
+        <button onclick="document.getElementById('abcInput').click()" class="px-4 py-2 bg-gray-200 rounded">Imagen ABC</button>
+        <input id="abcInput" type="file" accept="image/*" onchange="handleABCUpload(event)" class="hidden">
+        <button onclick="window.print()" class="px-4 py-2 bg-purple-600 text-white rounded">Generar PDF</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="max-w-7xl mx-auto px-4 py-6">
+    ${Object.entries(grouped).map(([cliente, tipos]) => `
+      <div class="mb-10">
+        ${Object.entries(tipos).map(([tipo, vehiculos], i) => `
+          <div class="${i > 0 ? 'vehicle-type-section' : ''}">
+            <div class="flex justify-between items-center mb-4">
+              <h2 class="font-bold text-lg" style="color:${state.qrColor}">${cliente}</h2>
+              <h3 class="font-semibold text-lg" style="color:${state.qrColor}">${tipo}</h3>
+            </div>
+            <div class="flex flex-wrap justify-center gap-3">
+              ${vehiculos.map(v => `
+                <div class="qr-card">
+                  <div class="qr-section">
+                    ${state.qrDataUrls[v.patente] ? `<img src="${state.qrDataUrls[v.patente]}" alt="QR ${v.patente}">` : `<div style="width:132px;height:132px;background:#e5e7eb;display:grid;place-items:center;font-size:10px;">Generando...</div>`}
+                    <h3>${v.patente}</h3>
+                  </div>
+                  ${state.abcImageUrl ? `
+                    <div class="abc-section">
+                      <div class="abc-inner">
+                        <img src="${state.abcImageUrl}" class="abc-img" alt="ABC">
+                      </div>
+                    </div>
+                  ` : `
+                    <div class="abc-section" style="background:#f3f4f6;">
+                      <span style="font-size:12px;color:#9ca3af;">ABC no cargado</span>
+                    </div>
+                  `}
+                </div>
+              `).join('')}
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    `).join('')}
+  </div>
+  `;
+}
+
+render();
+</script>
+</body>
+</html>
